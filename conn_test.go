@@ -67,6 +67,21 @@ func TestValidCommunication(t *testing.T) {
 		t.Fatalf("unexpected local address: %v", addr)
 	}
 
+	// test against regression from https://github.com/pion/mdns/commit/608f20b
+	// where by properly sending mDNS responses to all interfaces, we significantly
+	// increased the chance that we send a loopback response to a Query that is
+	// unwillingly to use loopback addresses (the default in pion/ice).
+	for i := 0; i < 100; i++ {
+		_, addr, err = bServer.Query(context.TODO(), "pion-mdns-2.local")
+		check(err, t)
+		if addr.String() == localAddress {
+			t.Fatalf("unexpected local address: %v", addr)
+		}
+		if addr.String() == "127.0.0.1" {
+			t.Fatal("unexpected loopback")
+		}
+	}
+
 	check(aServer.Close(), t)
 	check(bServer.Close(), t)
 }
@@ -90,6 +105,81 @@ func TestValidCommunicationWithAddressConfig(t *testing.T) {
 	check(err, t)
 	if addr.String() != localAddress {
 		t.Fatalf("address mismatch: expected %s, but got %v\n", localAddress, addr)
+	}
+
+	check(aServer.Close(), t)
+}
+
+func TestValidCommunicationWithLoopbackAddressConfig(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener(t)
+
+	loopbackIP := net.ParseIP("127.0.0.1")
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+		LocalAddress:    loopbackIP,
+		IncludeLoopback: true, // the test would fail if this was false
+	})
+	check(err, t)
+
+	_, addr, err := aServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if addr.String() != loopbackIP.String() {
+		t.Fatalf("address mismatch: expected %s, but got %v\n", localAddress, addr)
+	}
+
+	check(aServer.Close(), t)
+}
+
+func TestValidCommunicationWithLoopbackAddressConfigAndInterface(t *testing.T) {
+	lim := test.TimeOut(time.Second * 10)
+	defer lim.Stop()
+
+	report := test.CheckRoutines(t)
+	defer report()
+
+	aSock := createListener(t)
+
+	ifaces, err := net.Interfaces()
+	check(err, t)
+	ifacesToUse := make([]net.Interface, 0, len(ifaces))
+	for _, ifc := range ifaces {
+		if ifc.Flags&net.FlagLoopback != net.FlagLoopback {
+			continue
+		}
+		ifcCopy := ifc
+		ifacesToUse = append(ifacesToUse, ifcCopy)
+	}
+
+	// the following checks are unlikely to fail since most places where this code runs
+	// will have a loopback
+	if len(ifacesToUse) == 0 {
+		t.Skip("expected at least one loopback interface, but got none")
+	}
+	expectedAddrs, err := ifacesToUse[0].Addrs()
+	check(err, t)
+	expectedAddr, ok := expectedAddrs[0].(*net.IPNet)
+	if !ok {
+		t.Fatalf("expected *net.IPNet address for loopback but got %T", expectedAddrs[0])
+	}
+
+	aServer, err := Server(ipv4.NewPacketConn(aSock), &Config{
+		LocalNames:      []string{"pion-mdns-1.local", "pion-mdns-2.local"},
+		IncludeLoopback: true, // the test would fail if this was false
+		Interfaces:      ifacesToUse,
+	})
+	check(err, t)
+
+	_, addr, err := aServer.Query(context.TODO(), "pion-mdns-1.local")
+	check(err, t)
+	if addr.String() != expectedAddr.IP.String() {
+		t.Fatalf("address mismatch: expected %s, but got %v\n", expectedAddr.IP.String(), addr)
 	}
 
 	check(aServer.Close(), t)

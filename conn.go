@@ -63,16 +63,23 @@ func Server(conn *ipv4.PacketConn, config *Config) (*Conn, error) {
 		return nil, errNilConfig
 	}
 
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return nil, err
+	ifaces := config.Interfaces
+	if ifaces == nil {
+		var err error
+		ifaces, err = net.Interfaces()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	inboundBufferSize := 0
 	joinErrCount := 0
 	ifacesToUse := make([]net.Interface, 0, len(ifaces))
 	for i, ifc := range ifaces {
-		if err = conn.JoinGroup(&ifaces[i], &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251)}); err != nil {
+		if !config.IncludeLoopback && ifc.Flags&net.FlagLoopback == net.FlagLoopback {
+			continue
+		}
+		if err := conn.JoinGroup(&ifaces[i], &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251)}); err != nil {
 			joinErrCount++
 			continue
 		}
@@ -178,6 +185,11 @@ func (c *Conn) Query(ctx context.Context, name string) (dnsmessage.ResourceHeade
 		case <-c.closed:
 			return dnsmessage.ResourceHeader{}, nil, errConnectionClosed
 		case res := <-queryChan:
+			// Given https://datatracker.ietf.org/doc/html/draft-ietf-mmusic-mdns-ice-candidates#section-3.2.2-2
+			// An ICE agent SHOULD ignore candidates where the hostname resolution returns more than one IP address.
+			//
+			// We will take the first we receive which could result in a race between two suitable addresses where
+			// one is better than the other (e.g. localhost vs LAN).
 			return res.answer, res.addr, nil
 		case <-ctx.Done():
 			return dnsmessage.ResourceHeader{}, nil, errContextElapsed
@@ -242,14 +254,14 @@ func (c *Conn) sendQuestion(name string) {
 	c.writeToSocket(0, rawQuery, false)
 }
 
-func (c *Conn) writeToSocket(ifIndex int, b []byte, onlyLooback bool) {
+func (c *Conn) writeToSocket(ifIndex int, b []byte, srcIfcIsLoopback bool) {
 	if ifIndex != 0 {
 		ifc, err := net.InterfaceByIndex(ifIndex)
 		if err != nil {
 			c.log.Warnf("Failed to get interface interface for %d: %v", ifIndex, err)
 			return
 		}
-		if onlyLooback && ifc.Flags&net.FlagLoopback == 0 {
+		if srcIfcIsLoopback && ifc.Flags&net.FlagLoopback == 0 {
 			// avoid accidentally tricking the destination that itself is the same as us
 			c.log.Warnf("Interface is not loopback %d", ifIndex)
 			return
@@ -264,7 +276,7 @@ func (c *Conn) writeToSocket(ifIndex int, b []byte, onlyLooback bool) {
 		return
 	}
 	for ifcIdx := range c.ifaces {
-		if onlyLooback && c.ifaces[ifcIdx].Flags&net.FlagLoopback == 0 {
+		if srcIfcIsLoopback && c.ifaces[ifcIdx].Flags&net.FlagLoopback == 0 {
 			// avoid accidentally tricking the destination that itself is the same as us
 			continue
 		}
@@ -278,7 +290,7 @@ func (c *Conn) writeToSocket(ifIndex int, b []byte, onlyLooback bool) {
 	}
 }
 
-func (c *Conn) sendAnswer(name string, ifIndex int, dst net.IP) {
+func (c *Conn) sendAnswer(name string, ifIndex int, addr net.IP) {
 	packedName, err := dnsmessage.NewName(name)
 	if err != nil {
 		c.log.Warnf("Failed to construct mDNS packet %v", err)
@@ -299,7 +311,7 @@ func (c *Conn) sendAnswer(name string, ifIndex int, dst net.IP) {
 					TTL:   responseTTL,
 				},
 				Body: &dnsmessage.AResource{
-					A: ipToBytes(dst),
+					A: ipToBytes(addr),
 				},
 			},
 		},
@@ -311,7 +323,7 @@ func (c *Conn) sendAnswer(name string, ifIndex int, dst net.IP) {
 		return
 	}
 
-	c.writeToSocket(ifIndex, rawAnswer, dst.IsLoopback())
+	c.writeToSocket(ifIndex, rawAnswer, addr.IsLoopback())
 }
 
 func (c *Conn) start(inboundBufferSize int, config *Config) { //nolint gocognit

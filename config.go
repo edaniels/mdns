@@ -8,13 +8,24 @@ import (
 	"time"
 
 	"github.com/pion/logging"
+	"golang.org/x/net/ipv6"
 )
 
 const (
 	// DefaultAddress is the default used by mDNS
 	// and in most cases should be the address that the
-	// net.Conn passed to Server is bound to
+	// ipv4.PacketConn passed to Server is bound to
 	DefaultAddress = "224.0.0.0:5353"
+
+	// DefaultAddressIPv4 is the default used by mDNS
+	// and in most cases should be the address that the
+	// ipv4.PacketConn passed to Server is bound to
+	DefaultAddressIPv4 = DefaultAddress
+
+	// DefaultAddressIPv6 is the default IPv6 address used
+	// by mDNS and in most cases should be the address that
+	// the ipv6.PacketConn passed to Server is bound to
+	DefaultAddressIPv6 = "[FF02::]:5353"
 )
 
 // Config is used to configure a mDNS client or server.
@@ -38,4 +49,8 @@ type Config struct {
 
 	// Interfaces will override the interfaces used for queries and answers.
 	Interfaces []net.Interface
+
+	// MulticastConnV6 is used to receive mDNS questions over IPv6. It can be used in conjunction
+	// with Server's ipv4.PacketConn or on its own if the Server ipv4 argument is nil.
+	MulticastConnV6 *ipv6.PacketConn
 }
